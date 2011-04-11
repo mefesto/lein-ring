@@ -2,7 +2,8 @@
   (:require [leiningen.compile :as compile]
             [clojure.java.io :as io]
             [clojure.string :as string])
-  (:use [clojure.contrib.prxml :only (prxml)])
+  (:use [clojure.contrib.prxml :only (prxml)]
+        [clojure.walk :only (postwalk)])
   (:import [java.util.jar Manifest
                           JarEntry
                           JarOutputStream]
@@ -64,16 +65,72 @@
   (or (get-in project [:ring :url-pattern])
       "/*"))
 
+(defn- make-filter [{:keys [name class]}]
+  [:filter
+   [:filter-name name]
+   [:filter-class class]])
+
+(defn- make-filter-mapping [{:keys [name url-pattern]}]
+  [:filter-mapping
+   [:filter-name name]
+   [:url-pattern url-pattern]])
+
+(defn- make-listener [class-name]
+  [:listener
+   [:listener-class class-name]])
+
+(defn- make-servlet [servlet]
+  [:servlet
+   [:servlet-name (:name servlet)]
+   [:servlet-class (:class servlet)]
+   (when-let [load-on-startup (:load-on-startup servlet)]
+     [:load-on-startup load-on-startup])])
+
+(defn- make-servlet-mapping [{:keys [name url-pattern]}]
+  [:servlet-mapping
+   [:servlet-name name]
+   [:url-pattern url-pattern]])
+
+(defn- make-resource-ref [{:keys [name type auth scope]}]
+  [:resource-ref
+   [:res-ref-name name]
+   [:res-type type]
+   [:res-auth (or auth "Container")]
+   [:res-sharing-scope (or scope "Shareable")]])
+
+(defn- make-web-dom [project]
+  (let [webxml (get-in project [:ring :webxml])]
+    (postwalk
+     #(if (vector? %) (vec (filter (comp not nil?) %)) %)
+     (vec (concat
+	   [:web-app]
+	   ;; filters
+	   (let [res (map make-filter (:filters webxml))]
+	     (when-not (empty? res) res))
+	   ;; filter-mappings
+	   (let [res (map make-filter-mapping (:filter-mappings webxml))]
+	     (when-not (empty? res) res))
+	   ;; listeners
+	   (let [res (map make-listener (:listeners webxml))]
+	     (when-not (empty? res) res))
+	   ;; servlets
+	   (map make-servlet
+		(conj (:servlets webxml)
+		      {:name (servlet-name project)
+		       :class (servlet-class project)}))
+	   ;; servlet-mappings
+	   (map make-servlet-mapping
+		(conj (:servlet-mappings webxml)
+		      {:name (servlet-name project)
+		       :url-pattern (url-pattern project)}))
+	   ;; resource-refs
+	   (let [res (map make-resource-ref (:resource-refs webxml))]
+	     (when-not (empty? res) res)))))))
+
 (defn make-web-xml [project]
-  (with-out-str
-    (prxml
-      [:web-app
-        [:servlet
-          [:servlet-name  (servlet-name project)]
-          [:servlet-class (servlet-class project)]]
-        [:servlet-mapping
-          [:servlet-name (servlet-name project)]
-          [:url-pattern (url-pattern project)]]])))
+  (-> (make-web-dom project)
+      (prxml)
+      (with-out-str)))
 
 (defn source-file [project namespace]
   (io/file (:compile-path project)
